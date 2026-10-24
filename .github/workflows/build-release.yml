@@ -11,7 +11,6 @@ run-name: Build v${{ github.event.client_payload.version || inputs.version }}
 permissions: { contents: write, actions: write }
 concurrency: { group: release-build, cancel-in-progress: false }
 env:
-  DISCORD_THREAD_ID: "1521002762219819009"
   TAURI_CLI_VERSION: "2.12.4"
 
 jobs:
@@ -189,12 +188,3 @@ jobs:
         run: |
           gh api /repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts --jq '.artifacts[].id' \
           | xargs -r -I{} gh api -X DELETE /repos/${{ github.repository }}/actions/artifacts/{}
-      - name: Notify — build done
-        uses: ./.github/actions/discord-notify
-        with:
-          webhook: ${{ secrets.DISCORD_WEBHOOK }}
-          thread-id: ${{ env.DISCORD_THREAD_ID }}
-          title: Release published
-          status: success
-          version: v${{ needs.prepare.outputs.version }}
-          description: "Both installers are attached to the [public release](${{ github.server_url }}/${{ github.repository }}/releases/tag/v${{ needs.prepare.outputs.version }})."
