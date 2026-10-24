@@ -1,0 +1,79 @@
+name: Discord notify
+description: POST a rich embed to a Discord webhook (optionally into a thread).
+
+inputs:
+  webhook:
+    description: Discord webhook URL (pass the secret here).
+    required: true
+  title:
+    description: Embed headline (an emoji is prepended from `status`).
+    required: true
+  status:
+    description: "One of: start | progress | success | warning | error | info. Picks the colour + emoji."
+    required: false
+    default: info
+  version:
+    description: Release version (e.g. v0.1.42); shown as a field when set.
+    required: false
+    default: ""
+  description:
+    description: Optional body text under the title (Markdown allowed).
+    required: false
+    default: ""
+  thread-id:
+    description: Optional thread ID to post into.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        WEBHOOK: ${{ inputs.webhook }}
+        TITLE: ${{ inputs.title }}
+        STATUS: ${{ inputs.status }}
+        VERSION: ${{ inputs.version }}
+        DESCRIPTION: ${{ inputs.description }}
+        THREAD_ID: ${{ inputs.thread-id }}
+      run: |
+        [ -z "$WEBHOOK" ] && { echo "DISCORD_WEBHOOK not set; skipping notice"; exit 0; }
+        url="$WEBHOOK"
+        [ -n "$THREAD_ID" ] && url="${url}?thread_id=${THREAD_ID}"
+
+        # Map the status keyword to a Discord colour (decimal) + a leading emoji.
+        case "$STATUS" in
+          start)    color=5793266;  emoji="🚀" ;;   # blurple
+          progress) color=15844367; emoji="🔨" ;;   # gold
+          success)  color=3066993;  emoji="✅" ;;   # green
+          warning)  color=15105570; emoji="⚠️" ;;   # orange
+          error)    color=15158332; emoji="❌" ;;   # red
+          *)        color=3447003;  emoji="ℹ️" ;;   # blue
+        esac
+
+        # Enrich from the runner's built-in context (no inputs needed for these).
+        repo="${GITHUB_REPOSITORY:-}"
+        server="${GITHUB_SERVER_URL:-https://github.com}"
+        run_url="${server}/${repo}/actions/runs/${GITHUB_RUN_ID:-}"
+
+        # jq builds the JSON so any quotes/newlines escape safely. Version is an
+        # optional field; description + a title link are added only when present.
+        # (No timestamp — Discord stamps every message itself.)
+        jq -n \
+          --arg title "$emoji $TITLE" \
+          --arg desc "$DESCRIPTION" \
+          --argjson color "$color" \
+          --arg version "$VERSION" \
+          --arg run_url "$run_url" \
+          '{
+            embeds: [
+              ({
+                 title: $title,
+                 color: $color,
+                 fields: (if $version != "" then [{ name: "Version", value: ("`" + $version + "`"), inline: true }] else [] end)
+               }
+               | (if $desc != "" then .description = $desc else . end)
+               | (if $run_url != "" then .url = $run_url else . end))
+            ]
+          }' \
+          | curl -fsSL -X POST -H "Content-Type: application/json" -d @- "$url"

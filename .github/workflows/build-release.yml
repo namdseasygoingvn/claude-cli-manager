@@ -1,0 +1,200 @@
+name: Release — Build & Release
+# Builds the Tauri app from the private source when the private trigger.yml dispatches.
+on:
+  repository_dispatch:
+    types: [build-release]
+  workflow_dispatch:
+    inputs:
+      version: { description: "Version to build (e.g., 0.1.42)", required: true, type: string }
+      sha: { description: "Commit SHA to build — pins the artifact + notes to the versioned commit", required: true, type: string }
+run-name: Build v${{ github.event.client_payload.version || inputs.version }}
+permissions: { contents: write, actions: write }
+concurrency: { group: release-build, cancel-in-progress: false }
+env:
+  DISCORD_THREAD_ID: "1521002762219819009"
+  TAURI_CLI_VERSION: "2.12.4"
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      sha: ${{ steps.check.outputs.sha }}
+      latest: ${{ steps.check.outputs.latest }}
+    steps:
+      - id: check
+        env:
+          VERSION: ${{ github.event.client_payload.version || inputs.version }}
+          SHA: ${{ github.event.client_payload.sha || inputs.sha }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::version must match major.minor.patch"; exit 1; }
+          [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::sha must be a 40-hex lowercase commit id"; exit 1; }
+          if BODY=$(gh release view "v$VERSION" --json body -q .body 2>view.err); then
+            MARK=$(printf '%s\n' "$BODY" | grep -oE 'source: [0-9a-f]{40}' | tail -n1 | cut -d' ' -f2 || true)
+            [ "$MARK" = "$SHA" ] || { echo "::error::v$VERSION already released from a different source"; exit 1; }
+          elif ! grep -q 'release not found' view.err; then cat view.err >&2; exit 1; fi
+          LATEST=true; CUR=$(gh release view --json tagName -q .tagName 2>/dev/null || true)
+          [ -z "$CUR" ] || [ "$(printf '%s\n%s\n' "${CUR#v}" "$VERSION" | sort -V | tail -n1)" = "$VERSION" ] || LATEST=false
+          printf 'version=%s\nsha=%s\nlatest=%s\n' "$VERSION" "$SHA" "$LATEST" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-latest, target: universal-apple-darwin, bundles: "app,dmg", artifact: mac }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc, bundles: nsis, artifact: win }
+    runs-on: ${{ matrix.os }}
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - name: Checkout private source
+        uses: actions/checkout@v4
+        with: { repository: namdseasygoingvn/claude-cli-manager-src, ref: "${{ needs.prepare.outputs.sha }}", token: "${{ secrets.SRC_READ_PAT }}", persist-credentials: false }
+      - name: Check the sha has the Tauri source
+        shell: bash
+        run: for f in Cargo.toml crates/app/tauri.conf.json; do [ -f "$f" ] || { echo "::error::$f is missing (this sha predates the Tauri port)"; exit 1; }; done
+      - name: Exclude build dirs from Defender (Windows)
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        shell: pwsh
+        run: Add-MpPreference -ExclusionPath "$env:GITHUB_WORKSPACE", "$env:RUNNER_TEMP", "$env:USERPROFILE\.cargo", "$env:LOCALAPPDATA\tauri"
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - name: Install the Rust toolchain named by rust-toolchain.toml
+        shell: bash
+        run: rustup toolchain install && rustup show active-toolchain && cargo clippy --version
+      - uses: Swatinem/rust-cache@v2
+        with: { key: "${{ matrix.target }}" }
+      - name: Pin build version
+        run: node crates/app/ci/pin-version.mjs
+      - name: Lint the workspace (Windows)
+        if: runner.os == 'Windows'
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Test the workspace (Windows)
+        if: runner.os == 'Windows'
+        run: cargo test --workspace
+      - name: Build the Tauri bundles
+        working-directory: crates/app
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: npx --yes "@tauri-apps/cli@$TAURI_CLI_VERSION" build --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
+      - name: Stage the bundles under their published names
+        shell: bash
+        env: { B: "target/${{ matrix.target }}/release/bundle" }
+        run: |
+          shopt -s nullglob; mkdir -p out; P="ClaudeQuotaMonitor-$VERSION"
+          stage() { local f=($1); [ ${#f[@]} -eq 1 ] || { echo "::error::$1 matched ${#f[@]} files, want 1"; exit 1; }; cp "${f[0]}" "out/$2"; }
+          if [ "$RUNNER_OS" = macOS ]; then
+            stage "$B/dmg/*_${VERSION}_universal.dmg" "$P-universal.dmg"
+            stage "$B/macos/*.app.tar.gz" "$P-universal.app.tar.gz"
+            stage "$B/macos/*.app.tar.gz.sig" "$P-universal.app.tar.gz.sig"
+          else
+            stage "$B/nsis/*_${VERSION}_x64-setup.exe" "$P-x64-setup.exe"
+            stage "$B/nsis/*_${VERSION}_x64-setup.exe.sig" "$P-x64-setup.exe.sig"
+          fi
+          ls -l out
+      - uses: actions/upload-artifact@v4
+        with: { name: "${{ matrix.artifact }}", path: out/*, if-no-files-found: error, retention-days: 1 }
+
+  release:
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - name: Checkout this repo (for its local actions)
+        uses: actions/checkout@v4
+      - name: Checkout private source (full history for changelog)
+        uses: actions/checkout@v4
+        with: { repository: namdseasygoingvn/claude-cli-manager-src, ref: "${{ needs.prepare.outputs.sha }}", token: "${{ secrets.SRC_READ_PAT }}", fetch-depth: 0, persist-credentials: false, path: src }
+      - uses: actions/download-artifact@v4
+        with: { path: artifacts, merge-multiple: true }
+      - name: Generate latest.yml and latest.json
+        env: { REPO_URL: "${{ github.server_url }}/${{ github.repository }}" }
+        run: |
+          P="ClaudeQuotaMonitor-$VERSION"; BASE="$REPO_URL/releases/download/v$VERSION"
+          node src/scripts/gen-latest-yml.mjs "artifacts/ClaudeQuotaMonitor-$VERSION-x64-setup.exe" "$VERSION" "ClaudeQuotaMonitor-$VERSION-x64-setup.exe" > artifacts/latest.yml
+          jq -n --arg v "$VERSION" --arg notes "$REPO_URL/releases/tag/v$VERSION" --arg date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg mac_sig "$(tr -d '\r\n' < "artifacts/$P-universal.app.tar.gz.sig")" --arg mac_url "$BASE/$P-universal.app.tar.gz" \
+            --arg win_sig "$(tr -d '\r\n' < "artifacts/$P-x64-setup.exe.sig")" --arg win_url "$BASE/$P-x64-setup.exe" \
+            '{version: $v, notes: $notes, pub_date: $date, platforms: {"darwin-aarch64": {signature: $mac_sig, url: $mac_url},
+              "darwin-x86_64": {signature: $mac_sig, url: $mac_url}, "windows-x86_64": {signature: $win_sig, url: $win_url}}}' > artifacts/latest.json
+      - name: Assert the release asset set
+        working-directory: artifacts
+        run: |
+          P="ClaudeQuotaMonitor-$VERSION"
+          WANT=$(printf '%s\n' "$P-universal.dmg" "$P-universal.app.tar.gz" "$P-universal.app.tar.gz.sig" \
+            "$P-x64-setup.exe" "$P-x64-setup.exe.sig" latest.json latest.yml | LC_ALL=C sort)
+          [ "$(ls -A | LC_ALL=C sort)" = "$WANT" ] || { echo "::error::release assets differ from the expected 7:" $(ls -A); exit 1; }
+          [ "$(ls *.dmg | wc -l)" -eq 1 ] || { echo "::error::the release must carry exactly one .dmg"; exit 1; }
+      - name: Build release notes
+        working-directory: src
+        env:
+          SHA: ${{ needs.prepare.outputs.sha }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          PREV_TAG=$(gh release list --exclude-drafts --exclude-pre-releases --json tagName -q '.[].tagName' | grep -vxF "v$VERSION" | head -n1 || true)
+          BASE="HEAD~15"
+          if [ -n "$PREV_TAG" ]; then
+            MARK=$(gh release view "$PREV_TAG" --json body -q .body | grep -oE 'source: [0-9a-f]{40}' | tail -n1 | cut -d' ' -f2 || true)
+            for c in "$MARK" "refs/tags/$PREV_TAG"; do if [ -n "$c" ] && git cat-file -e "$c^{commit}" 2>/dev/null; then BASE="$c"; break; fi; done
+          fi
+          RANGE="${BASE}..HEAD"
+          echo "Changelog range: $RANGE (prev tag: ${PREV_TAG:-none})"
+          CHANGES=$(git log "$RANGE" --no-merges --pretty=format:'%s' | grep -vE '^(Merge |Bump version)' \
+            | sed -E 's/^(feat|fix|chore|docs|refactor|perf|build|ci|test|style|revert)(\([^)]+\))?!?:[[:space:]]*//' \
+            | sed -E 's/^/- /' | head -n 20 || true)
+          [ -z "$CHANGES" ] && CHANGES="- Maintenance and internal improvements"
+          {
+            echo "Native menu-bar / tray app for watching Claude Code usage quota across multiple accounts."
+            echo
+            echo "## What's new in v${VERSION}"
+            echo "$CHANGES"
+            echo
+            echo "## Install"
+            echo "**macOS (Apple Silicon and Intel):**"
+            echo "1. Download the **.dmg** below, open it, and drag the app into **Applications**."
+            echo "2. **First open:** macOS blocks it (unsigned). macOS 15 or later: try to open it once, then **System Settings → Privacy & Security → Open Anyway**. macOS 14 or earlier: right-click the app → **Open → Open**. After that it opens normally."
+            echo
+            echo "**Windows (x64):**"
+            echo "1. Download the **…-x64-setup.exe** below and run it."
+            echo "2. **First run:** SmartScreen shows \"Windows protected your PC\" (unsigned) — click **More info → Run anyway**."
+            echo
+            echo "A **gauge icon** appears in your menu bar / system tray — there's no Dock or taskbar icon. Requires the \`claude\` CLI installed."
+            echo
+            echo "<!-- source: $SHA -->"
+          } > "$GITHUB_WORKSPACE/RELEASE_NOTES.md"
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: v${{ needs.prepare.outputs.version }}
+          name: v${{ needs.prepare.outputs.version }}
+          target_commitish: ${{ github.event.repository.default_branch }}
+          overwrite_files: true
+          make_latest: ${{ needs.prepare.outputs.latest }}
+          draft: false
+          prerelease: false
+          body_path: RELEASE_NOTES.md
+          files: artifacts/*
+      - name: Delete transient build artifacts
+        if: always()
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: |
+          gh api /repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts --jq '.artifacts[].id' \
+          | xargs -r -I{} gh api -X DELETE /repos/${{ github.repository }}/actions/artifacts/{}
+      - name: Notify — build done
+        uses: ./.github/actions/discord-notify
+        with:
+          webhook: ${{ secrets.DISCORD_WEBHOOK }}
+          thread-id: ${{ env.DISCORD_THREAD_ID }}
+          title: Release published
+          status: success
+          version: v${{ needs.prepare.outputs.version }}
+          description: "Both installers are attached to the [public release](${{ github.server_url }}/${{ github.repository }}/releases/tag/v${{ needs.prepare.outputs.version }})."
