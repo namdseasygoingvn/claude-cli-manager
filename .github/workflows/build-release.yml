@@ -92,7 +92,7 @@ jobs:
         shell: bash
         env: { B: "target/${{ matrix.target }}/release/bundle" }
         run: |
-          shopt -s nullglob; mkdir -p out; P="ClaudeQuotaMonitor-$VERSION"
+          shopt -s nullglob; mkdir -p out; P="ClaudeCLIManager-$VERSION"
           stage() { local f=($1); [ ${#f[@]} -eq 1 ] || { echo "::error::$1 matched ${#f[@]} files, want 1"; exit 1; }; cp "${f[0]}" "out/$2"; }
           if [ "$RUNNER_OS" = macOS ]; then
             stage "$B/dmg/*_${VERSION}_universal.dmg" "$P-universal.dmg"
@@ -123,8 +123,8 @@ jobs:
       - name: Generate latest.yml and latest.json
         env: { REPO_URL: "${{ github.server_url }}/${{ github.repository }}" }
         run: |
-          P="ClaudeQuotaMonitor-$VERSION"; BASE="$REPO_URL/releases/download/v$VERSION"
-          node src/scripts/gen-latest-yml.mjs "artifacts/ClaudeQuotaMonitor-$VERSION-x64-setup.exe" "$VERSION" "ClaudeQuotaMonitor-$VERSION-x64-setup.exe" > artifacts/latest.yml
+          P="ClaudeCLIManager-$VERSION"; BASE="$REPO_URL/releases/download/v$VERSION"
+          node src/scripts/gen-latest-yml.mjs "artifacts/ClaudeCLIManager-$VERSION-x64-setup.exe" "$VERSION" "ClaudeCLIManager-$VERSION-x64-setup.exe" > artifacts/latest.yml
           jq -n --arg v "$VERSION" --arg notes "$REPO_URL/releases/tag/v$VERSION" --arg date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             --arg mac_sig "$(tr -d '\r\n' < "artifacts/$P-universal.app.tar.gz.sig")" --arg mac_url "$BASE/$P-universal.app.tar.gz" \
             --arg win_sig "$(tr -d '\r\n' < "artifacts/$P-x64-setup.exe.sig")" --arg win_url "$BASE/$P-x64-setup.exe" \
@@ -133,7 +133,7 @@ jobs:
       - name: Assert the release asset set
         working-directory: artifacts
         run: |
-          P="ClaudeQuotaMonitor-$VERSION"
+          P="ClaudeCLIManager-$VERSION"
           WANT=$(printf '%s\n' "$P-universal.dmg" "$P-universal.app.tar.gz" "$P-universal.app.tar.gz.sig" \
             "$P-x64-setup.exe" "$P-x64-setup.exe.sig" latest.json latest.yml | LC_ALL=C sort)
           [ "$(ls -A | LC_ALL=C sort)" = "$WANT" ] || { echo "::error::release assets differ from the expected 7:" $(ls -A); exit 1; }
