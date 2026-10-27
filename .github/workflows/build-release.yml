@@ -9,7 +9,6 @@ on:
       sha: { description: "Commit SHA to build — pins the artifact + notes to the versioned commit", required: true, type: string }
 run-name: Build v${{ github.event.client_payload.version || inputs.version }}
 permissions: { contents: write, actions: write }
-concurrency: { group: release-build, cancel-in-progress: false }
 env:
   TAURI_CLI_VERSION: "2.12.4"
 
@@ -47,6 +46,8 @@ jobs:
           - { os: macos-latest, target: universal-apple-darwin, bundles: "app,dmg", artifact: mac }
           - { os: windows-latest, target: x86_64-pc-windows-msvc, bundles: nsis, artifact: win }
     runs-on: ${{ matrix.os }}
+    # A newer push replaces an older build still running; publishing below is never cancelled.
+    concurrency: { group: "release-build-${{ matrix.artifact }}", cancel-in-progress: true }
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
     steps:
@@ -108,6 +109,7 @@ jobs:
   release:
     needs: [prepare, build]
     runs-on: ubuntu-latest
+    concurrency: { group: release-publish, cancel-in-progress: false }
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
     steps:
