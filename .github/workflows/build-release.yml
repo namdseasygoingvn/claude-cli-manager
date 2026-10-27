@@ -36,6 +36,12 @@ jobs:
           LATEST=true; CUR=$(gh release view --json tagName -q .tagName 2>/dev/null || true)
           [ -z "$CUR" ] || [ "$(printf '%s\n%s\n' "${CUR#v}" "$VERSION" | sort -V | tail -n1)" = "$VERSION" ] || LATEST=false
           printf 'version=%s\nsha=%s\nlatest=%s\n' "$VERSION" "$SHA" "$LATEST" >> "$GITHUB_OUTPUT"
+      # A release without the sign-in config is `unconfigured`: it locks every user and the updater ships it.
+      # The expression yields only true/false, so no secret value reaches the shell.
+      - name: Check the sign-in secrets are set
+        run: |
+          [ "${{ secrets['CDM_AUTH_URL'] != '' && secrets['CDM_GOOGLE_CLIENT_ID'] != '' && secrets['CDM_GOOGLE_CLIENT_SECRET'] != '' }}" = true ] \
+            || { echo "::error::set CDM_AUTH_URL, CDM_GOOGLE_CLIENT_ID and CDM_GOOGLE_CLIENT_SECRET as repo secrets (same values as Claude Desktop Manager's); a build without them locks every user out"; exit 1; }
 
   build:
     needs: prepare
@@ -87,6 +93,9 @@ jobs:
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          CDM_AUTH_URL: ${{ secrets.CDM_AUTH_URL }}
+          CDM_GOOGLE_CLIENT_ID: ${{ secrets.CDM_GOOGLE_CLIENT_ID }}
+          CDM_GOOGLE_CLIENT_SECRET: ${{ secrets.CDM_GOOGLE_CLIENT_SECRET }}
         run: npx --yes "@tauri-apps/cli@$TAURI_CLI_VERSION" build --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
       - name: Stage the bundles under their published names
         shell: bash
@@ -172,7 +181,7 @@ jobs:
             echo "1. Download the **…-x64-setup.exe** below and run it."
             echo "2. **First run:** SmartScreen shows \"Windows protected your PC\" (unsigned) — click **More info → Run anyway**."
             echo
-            echo "A **gauge icon** appears in your menu bar / system tray — there's no Dock or taskbar icon. Requires the \`claude\` CLI installed."
+            echo "A **gauge icon** appears in your menu bar / system tray. Click it to open the app window and sign in with a Google account on the allowed list; the app shows in the Dock / taskbar only while that window is open. Requires the \`claude\` CLI installed."
             echo
             echo "<!-- source: $SHA -->"
           } > "$GITHUB_WORKSPACE/RELEASE_NOTES.md"
