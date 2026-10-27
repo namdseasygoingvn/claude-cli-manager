@@ -70,6 +70,10 @@ jobs:
         with: { key: "${{ matrix.target }}" }
       - name: Pin build version
         run: node crates/app/ci/pin-version.mjs
+      - name: Build the macOS sidecars
+        if: runner.os == 'macOS'
+        shell: bash
+        run: bash scripts/build-sidecars.sh ${{ matrix.target }}
       - name: Lint the workspace (Windows)
         if: runner.os == 'Windows'
         run: cargo clippy --workspace --all-targets -- -D warnings
