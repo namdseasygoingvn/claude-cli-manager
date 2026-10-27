@@ -52,7 +52,7 @@ jobs:
       VERSION: ${{ needs.prepare.outputs.version }}
     steps:
       - name: Checkout private source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with: { repository: namdseasygoingvn/claude-cli-manager-src, ref: "${{ needs.prepare.outputs.sha }}", token: "${{ secrets.SRC_READ_PAT }}", persist-credentials: false }
       - name: Check the sha has the Tauri source
         shell: bash
@@ -62,7 +62,7 @@ jobs:
         continue-on-error: true
         shell: pwsh
         run: Add-MpPreference -ExclusionPath "$env:GITHUB_WORKSPACE", "$env:RUNNER_TEMP", "$env:USERPROFILE\.cargo", "$env:LOCALAPPDATA\tauri"
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with: { node-version: 22 }
       - name: Install the Rust toolchain named by rust-toolchain.toml
         shell: bash
@@ -103,7 +103,7 @@ jobs:
             stage "$B/nsis/*_${VERSION}_x64-setup.exe.sig" "$P-x64-setup.exe.sig"
           fi
           ls -l out
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with: { name: "${{ matrix.artifact }}", path: out/*, if-no-files-found: error, retention-days: 1 }
 
   release:
@@ -114,11 +114,11 @@ jobs:
       VERSION: ${{ needs.prepare.outputs.version }}
     steps:
       - name: Checkout this repo (for its local actions)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       - name: Checkout private source (full history for changelog)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with: { repository: namdseasygoingvn/claude-cli-manager-src, ref: "${{ needs.prepare.outputs.sha }}", token: "${{ secrets.SRC_READ_PAT }}", fetch-depth: 0, persist-credentials: false, path: src }
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with: { path: artifacts, merge-multiple: true }
       - name: Generate latest.yml and latest.json
         env: { REPO_URL: "${{ github.server_url }}/${{ github.repository }}" }
